@@ -1444,9 +1444,13 @@ class SLRBenchVerifier(VerifierFunction):
                 ref = json.loads(ref)
             except json.JSONDecodeError:
                 ref = ref
-        if not isinstance(ref, dict) or "validation_program" not in ref or "evaluation_config" not in ref:
+        has_split_programs = isinstance(ref, dict) and "extensional_program" in ref and "isomorphic_program" in ref
+        has_legacy_program = isinstance(ref, dict) and "validation_program" in ref
+        if not isinstance(ref, dict) or not (has_split_programs or has_legacy_program) or "evaluation_config" not in ref:
             logger.warning(
-                "SLRBenchVerifier expected label to be a dict with 'validation_program' and 'evaluation_config'. Got type=%s. with value %s",
+                "SLRBenchVerifier expected label to be a dict with either "
+                "'extensional_program'+'isomorphic_program' or (legacy) 'validation_program', "
+                "plus 'evaluation_config'. Got type=%s. with value %s",
                 type(ref).__name__,
                 ref,
             )
@@ -1463,18 +1467,39 @@ class SLRBenchVerifier(VerifierFunction):
 
         rule_simplicity_bonus = self.get_rule_simplicity_bonus(rule)
 
-        validation_program = ref["validation_program"]
         eval_config = ref.get(
             "evaluation_config", {"positive_predicate": "eastbound", "negative_predicate": "westbound"}
         )
+
+        # New schema: extensional and isomorphic programs are pre-computed and stored
+        # separately (SLR-Bench's "validation_program_shortcuts" / "validation program").
+        # Each judge gets the program that's actually correct for it, and
+        # isomorphic=False tells evaluate_prediction to just rename predicates
+        # (pos/neg) -- no further train->mytrain substitution needed, since the
+        # program handed in is already in the right form.
+        #
+        # Legacy schema (also what the unit tests below use): a single
+        # "validation_program" field. The isomorphic form is derived on the fly
+        # via string substitution inside evaluate_prediction (isomorphic=True/False),
+        # exactly how this verifier originally worked before the dataset added
+        # a separate extensional field.
+        if has_split_programs:
+            programs = {
+                "base": (ref["extensional_program"], False),
+                "isomorphic": (ref["isomorphic_program"], False),
+            }
+        else:
+            vp = ref["validation_program"]
+            programs = {"base": (vp, False), "isomorphic": (vp, True)}
 
         # judge_scores: dict[str, float] = {}
         scores: dict[str, float] = {}
         scores["slr_bench_format"] = 1.0 if format_ok else 0.0  # 1.0 = [RULE] tags used
         for judge_name in ["isomorphic", "base"]:
+            validation_program, iso_flag = programs[judge_name]
             try:
                 result = self._evaluate_prediction(
-                    rule, validation_program, eval_config, timeout=5, isomorphic=(judge_name == "isomorphic")
+                    rule, validation_program, eval_config, timeout=5, isomorphic=iso_flag
                 )
             except Exception as e:
                 logger.warning("[SLRBenchVerifier] %s metric failed: %s", judge_name, e, exc_info=True)

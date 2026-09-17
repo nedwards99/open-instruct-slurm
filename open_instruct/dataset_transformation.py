@@ -1409,26 +1409,62 @@ def slr_bench_prepare_v1(row: dict[str, Any], tokenizer: PreTrainedTokenizer, **
     Convert AIML-TUDA/SLR-Bench raw columns to RLVR format (messages, ground_truth, dataset).
 
     No-op for rows that already have "messages" (e.g. when mixing with other datasets).
+
+    Reads the extensional ("validation_program_shortcuts") and isomorphic
+    ("validation program") validation programs SEPARATELY. SLR-Bench's schema
+    changed after this was first written: "validation program" used to hold
+    the raw extensional program (isomorphic form derived on the fly via
+    string substitution in evaluate_prediction), but now holds the
+    pre-computed isomorphic program directly, with the real extensional one
+    in a separate field. Falls back to the legacy single-field + derivation
+    behavior if "validation_program_shortcuts" isn't present.
+
+    Also fixes a second schema mismatch: SLR-Bench's "prompt" column is a
+    plain string, not a pre-formatted messages list, so it must be wrapped
+    before tokenizer.apply_chat_template.
+
+    Prompt-variant wrapping (inoculation-prompting study) is controlled by
+    env vars rather than a new CLI flag, to avoid threading new fields through
+    the whole config dataclass chain: set SLR_PROMPT_VARIANT /
+    SLR_PROMPT_PARAPHRASE_IDX / SLR_PROMPT_POSITION before launching
+    grpo_fast.py. See slr/prompt_variants.py for the variant definitions --
+    kept in sync with llms-gaming-verifiers/prompt_variants.py by hand.
     """
     if DEFAULT_SFT_MESSAGES_KEY in row:
         return row
     prompt = row.get("prompt")
-    validation_program = row.get("validation program") or row.get("validation_program")
-    if prompt is None or validation_program is None:
+    extensional_program = row.get("validation_program_shortcuts")
+    isomorphic_program = row.get("validation program") or row.get("validation_program")
+    if prompt is None or (extensional_program is None and isomorphic_program is None):
         return row
-    # prompt += (
-    #     "\n\nWrap your final Prolog rule in [RULE]...[/RULE] tags. "
-    #     "Only the content inside these tags will be evaluated. "
-    #     "Example: [RULE] eastbound(T) :- has_car(T,C), short(C). [/RULE]"
-    # )
+
+    eval_config = {"positive_predicate": "eastbound", "negative_predicate": "westbound"}
+    if extensional_program is None:
+        extensional_program = isomorphic_program
+    if isomorphic_program is None:
+        from open_instruct.slr.slr_verifier import prepare_validation_program_isomorphic  # noqa: PLC0415
+
+        isomorphic_program = prepare_validation_program_isomorphic(
+            extensional_program, eval_config["positive_predicate"], eval_config["negative_predicate"]
+        )
+
+    from open_instruct.slr.prompt_variants import apply_variant  # noqa: PLC0415
+
+    variant = os.environ.get("SLR_PROMPT_VARIANT", "neutral")
+    paraphrase_idx = int(os.environ.get("SLR_PROMPT_PARAPHRASE_IDX", "0"))
+    position = os.environ.get("SLR_PROMPT_POSITION", "prepend")
+    prompt = apply_variant(prompt, variant, paraphrase_idx, position)
+
     validation_program_dict = {
-        "validation_program": validation_program,
-        "evaluation_config": {"positive_predicate": "eastbound", "negative_predicate": "westbound"},
+        "extensional_program": extensional_program,
+        "isomorphic_program": isomorphic_program,
+        "evaluation_config": eval_config,
     }
     row[GROUND_TRUTHS_KEY] = json.dumps(validation_program_dict)
     row[VERIFIER_SOURCE_KEY] = "slr_bench"
-    row[INPUT_IDS_PROMPT_KEY] = tokenizer.apply_chat_template(prompt, add_generation_prompt=True)
-    row[RAW_PROMPT_KEY] = prompt
+    messages = [{"role": "user", "content": prompt}]
+    row[INPUT_IDS_PROMPT_KEY] = tokenizer.apply_chat_template(messages, add_generation_prompt=True)
+    row[RAW_PROMPT_KEY] = messages
     row["id"] = str(row["id"]) + "_slr_bench"
     return row
 

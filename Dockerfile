@@ -12,51 +12,24 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     make \
     sudo \
     nginx \
+    swi-prolog \
     && apt-get autoremove -y \
     && mkdir -p /etc/nginx/conf.d \
     && rm -rf /var/lib/apt/lists/*
+# swi-prolog is required at runtime: open_instruct/slr/slr_verifier.py shells
+# out to `swipl` to score SLR-Bench predictions. Without it, every
+# SLRBenchVerifier reward call fails.
 
 # This ensures the dynamic linker (or NVIDIA's container runtime, I'm not sure)
 # puts the right NVIDIA things in the right place (that THOR requires).
 ENV NVIDIA_DRIVER_CAPABILITIES=graphics,utility,compute
 
-# Install DOCA OFED user-space drivers
-# See https://docs.nvidia.com/doca/sdk/doca-host+installation+and+upgrade/index.html
-# doca-ofed-userspace ver 2.10.0 depends on mft=4.31.0-149
-ENV MFT_VER=4.31.0-149
-RUN wget https://www.mellanox.com/downloads/MFT/mft-${MFT_VER}-x86_64-deb.tgz && \
-    tar -xzf mft-${MFT_VER}-x86_64-deb.tgz && \
-    mft-${MFT_VER}-x86_64-deb/install.sh --without-kernel && \
-    rm mft-${MFT_VER}-x86_64-deb.tgz
-
-ENV DOFED_VER=2.10.0 \
-    OS_VER=ubuntu2204
-RUN wget https://www.mellanox.com/downloads/DOCA/DOCA_v${DOFED_VER}/host/doca-host_${DOFED_VER}-093000-25.01-${OS_VER}_amd64.deb && \
-    dpkg -i doca-host_${DOFED_VER}-093000-25.01-${OS_VER}_amd64.deb && \
-    apt-get update && apt-get -y install --no-install-recommends doca-ofed-userspace && \
-    apt-get autoremove -y && \
-    rm doca-host_${DOFED_VER}-093000-25.01-${OS_VER}_amd64.deb
-
-# Install Google Cloud CLI
-RUN echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] http://packages.cloud.google.com/apt cloud-sdk main" \
-        | tee -a /etc/apt/sources.list.d/google-cloud-sdk.list \
-    && curl https://packages.cloud.google.com/apt/doc/apt-key.gpg \
-        | apt-key --keyring /usr/share/keyrings/cloud.google.gpg add - \
-    && apt-get update -y && apt-get install -y --no-install-recommends google-cloud-sdk \
-    && apt-get autoremove -y \
-    && rm -rf /var/lib/apt/lists/*
-# Taken from https://beaker.org/api/v3/release (add | jq -r '.version' if you want it programmatically).
-ENV BEAKER_VERSION=v1.5.235
-RUN curl --silent \
-    --connect-timeout 5 \
-    --max-time 10 \
-    --retry 5 \
-    --retry-delay 0 \
-    --retry-max-time 40 \
-    --output beaker.tar.gz \
-    "https://beaker.org/api/v3/release/cli?os=linux&arch=amd64&version=${BEAKER_VERSION}" \
-    && tar -zxf beaker.tar.gz -C /usr/local/bin/ ./beaker \
-    && rm beaker.tar.gz
+# NOTE: upstream also installs Mellanox MFT/DOCA-OFED drivers, the Google
+# Cloud CLI, and the Beaker CLI here. All three are Ai2-infrastructure-specific
+# (their InfiniBand NICs, GCS storage, and Beaker job submission respectively)
+# and irrelevant for a plain Slurm+Pyxis setup that calls open_instruct/grpo_fast.py
+# directly. Removed them — the Beaker CLI download in particular has a 10s
+# --max-time hitting beaker.org, which is what was timing out on this network.
 
 COPY --from=ghcr.io/astral-sh/uv:0.8.6 /uv /uvx /bin/
 
