@@ -7,8 +7,6 @@ import tarfile
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
-import docker as docker_sdk
-
 from open_instruct import logger_utils
 
 logger = logger_utils.setup_logger(__name__)
@@ -63,6 +61,11 @@ class DockerBackend(SandboxBackend):
             timeout: Per-command timeout in seconds (default: 1800 / 30 min)
             mem_limit: Memory limit for the container (default: 4g)
         """
+        # Imported lazily: the `docker` SDK is only needed if this backend is
+        # actually instantiated, not by every caller that imports this module.
+        import docker as docker_sdk
+
+        self._docker_sdk = docker_sdk
         self._image = image
         self._timeout = timeout
         self._mem_limit = mem_limit
@@ -72,7 +75,7 @@ class DockerBackend(SandboxBackend):
     def start(self) -> None:
         logger.info(f"Starting Docker container (image={self._image})")
         if self._client is None:
-            self._client = docker_sdk.from_env()
+            self._client = self._docker_sdk.from_env()
         self._container = self._client.containers.run(
             self._image,
             command="sleep infinity",
@@ -120,9 +123,9 @@ class DockerBackend(SandboxBackend):
 
         try:
             tar_chunks, _stat = self._container.get_archive(path)
-        except docker_sdk.errors.NotFound:
+        except self._docker_sdk.errors.NotFound:
             raise FileNotFoundError(f"File not found in container: '{path}'") from None
-        except docker_sdk.errors.APIError as e:
+        except self._docker_sdk.errors.APIError as e:
             raise FileNotFoundError(f"Failed to read file '{path}': {e}") from None
 
         tar_bytes = b"".join(tar_chunks)

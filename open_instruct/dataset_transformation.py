@@ -1404,7 +1404,14 @@ def rlvr_tokenize_v2(
     return row
 
 
-def slr_bench_prepare_v1(row: dict[str, Any], tokenizer: PreTrainedTokenizer, **kwargs: Any) -> dict[str, Any]:
+def slr_bench_prepare_v1(
+    row: dict[str, Any],
+    tokenizer: PreTrainedTokenizer,
+    prompt_variant: str | None = None,
+    prompt_paraphrase_idx: int | None = None,
+    prompt_position: str | None = None,
+    **kwargs: Any,
+) -> dict[str, Any]:
     """
     Convert AIML-TUDA/SLR-Bench raw columns to RLVR format (messages, ground_truth, dataset).
 
@@ -1429,6 +1436,13 @@ def slr_bench_prepare_v1(row: dict[str, Any], tokenizer: PreTrainedTokenizer, **
     SLR_PROMPT_PARAPHRASE_IDX / SLR_PROMPT_POSITION before launching
     grpo_fast.py. See slr/prompt_variants.py for the variant definitions --
     kept in sync with llms-gaming-verifiers/prompt_variants.py by hand.
+
+    Callers that prepare more than one dataset per run pass the settings
+    explicitly instead (prompt_variant / prompt_paraphrase_idx /
+    prompt_position), which is what lets grpo_fast.py train on one variant and
+    evaluate on the neutral prompt. Explicit arguments also land in
+    transform_fn_args and so in the dataset cache hash; the env vars do not,
+    so an env-only run reuses a cache entry built under a different variant.
     """
     if DEFAULT_SFT_MESSAGES_KEY in row:
         return row
@@ -1448,11 +1462,12 @@ def slr_bench_prepare_v1(row: dict[str, Any], tokenizer: PreTrainedTokenizer, **
             extensional_program, eval_config["positive_predicate"], eval_config["negative_predicate"]
         )
 
-    from open_instruct.slr.prompt_variants import apply_variant  # noqa: PLC0415
+    from open_instruct.slr.prompt_variants import apply_variant, variant_args_from_env  # noqa: PLC0415
 
-    variant = os.environ.get("SLR_PROMPT_VARIANT", "neutral")
-    paraphrase_idx = int(os.environ.get("SLR_PROMPT_PARAPHRASE_IDX", "0"))
-    position = os.environ.get("SLR_PROMPT_POSITION", "prepend")
+    env_args = variant_args_from_env()
+    variant = prompt_variant if prompt_variant is not None else env_args["prompt_variant"]
+    paraphrase_idx = prompt_paraphrase_idx if prompt_paraphrase_idx is not None else env_args["prompt_paraphrase_idx"]
+    position = prompt_position if prompt_position is not None else env_args["prompt_position"]
     prompt = apply_variant(prompt, variant, paraphrase_idx, position)
 
     validation_program_dict = {

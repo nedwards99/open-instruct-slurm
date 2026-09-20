@@ -107,6 +107,7 @@ from open_instruct.model_utils import (
     push_folder_to_hub,
 )
 from open_instruct.rl_utils import Timer, masked_mean
+from open_instruct.slr import prompt_variants
 from open_instruct.utils import (
     INVALID_LOGPROB,
     ArgumentParserPlus,
@@ -1145,8 +1146,30 @@ def setup_datasets(
             system_prompt_override = f.read().strip()
         logger.info(f"System prompt overriden to:\n#####\n{system_prompt_override}\n#####\n")
 
+    # Inoculation study: train on the configured variant, evaluate on the
+    # neutral prompt. Passed per dataset (not read from the env inside the
+    # transform) so each variant gets its own dataset cache entry. The args
+    # list is positional, so these only apply when slr_bench_prepare_v1 is
+    # actually the first transform -- every other transform here rejects
+    # unknown keyword arguments.
+    slr_prepare_is_first = streaming_config.dataset_transform_fn[:1] == ["slr_bench_prepare_v1"]
+    train_slr_args = prompt_variants.variant_args_from_env(prompt_variants.TRAIN_ENV_PREFIX)
+    eval_slr_args = prompt_variants.variant_args_from_env(prompt_variants.EVAL_ENV_PREFIX)
+    if slr_prepare_is_first:
+        logger.info(
+            "SLR prompt variant: train=%s (paraphrase %s, %s), eval=%s (paraphrase %s, %s)",
+            train_slr_args["prompt_variant"],
+            train_slr_args["prompt_paraphrase_idx"],
+            train_slr_args["prompt_position"],
+            eval_slr_args["prompt_variant"],
+            eval_slr_args["prompt_paraphrase_idx"],
+            eval_slr_args["prompt_position"],
+        )
+    else:
+        train_slr_args = eval_slr_args = {}
+
     transform_fn_args = [
-        {},
+        train_slr_args,
         {
             "system_prompt_override": system_prompt_override,
             "tool_definitions": tool_definitions,
@@ -1156,6 +1179,7 @@ def setup_datasets(
         },
         {"max_prompt_token_length": streaming_config.max_prompt_token_length},
     ]
+    eval_transform_fn_args = [eval_slr_args, *transform_fn_args[1:]]
     train_dataset, train_dataset_stats = get_cached_dataset_tulu_with_statistics(
         dataset_mixer_list=streaming_config.dataset_mixer_list,
         dataset_mixer_list_splits=streaming_config.dataset_mixer_list_splits,
@@ -1182,7 +1206,7 @@ def setup_datasets(
             dataset_mixer_list_splits=streaming_config.dataset_mixer_eval_list_splits,
             tc=tc,
             dataset_transform_fn=streaming_config.dataset_transform_fn,
-            transform_fn_args=transform_fn_args,
+            transform_fn_args=eval_transform_fn_args,
             hf_entity=args.hf_entity,
             dataset_cache_mode=streaming_config.dataset_cache_mode,
             dataset_config_hash=streaming_config.dataset_config_eval_hash,
@@ -2248,7 +2272,7 @@ def main(
         # Only upload working dir for local clusters.  Multi-node setups
         # (Slurm / Beaker) share files via bind-mount or Docker image, so
         # uploading is unnecessary and causes slow UV re-installs per worker.
-        runtime_env["excludes"] = [".git/", "checkpoints/", "output/"]
+        ray_init_kwargs["runtime_env"]["excludes"] = [".git/", "checkpoints/", "output/"]
     ray.init(**ray_init_kwargs)
 
     pool_size = tools_config.pool_size
